@@ -30,6 +30,8 @@ PLAID_SECRET=<devlopment secret>
 PLAID_ENVIRONMENT=development
 PLAID_LANGUAGE=en  # optional, detected using system's locale
 PLAID_COUNTRIES=US # optional, detected using system's locale
+AIRTABLE_API_KEY=<airtable API key>  # needed for syncing data into Airtable base
+AIRTABLE_APP_ID=<airtable base ID> # target base application to dump data into
 ```
 
 I recommend setting and exporting these on shell startup.

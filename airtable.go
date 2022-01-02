@@ -2,27 +2,30 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"time"
+
 	"github.com/brianloveswords/airtable"
 	"github.com/plaid/plaid-go/plaid"
-	"os"
-	_ "time"
 )
 
 var _ = fmt.Println
 
 type TransactionFields struct {
-	PlaidID      string
-	AccountID    string
-	Amount       float64
-	Name         string
-	MerchantName string
-	Pending      bool
-	DateTime     string
-	Category1   string
-	Category2   string
-	Category3   string
-	Category12  airtable.MultiSelect
-	Category123 airtable.MultiSelect
+	PlaidID        string
+	AccountID      string
+	Amount         float64
+	Name           string
+	MerchantName   string
+	Pending        bool
+	DateTime       string
+	Address        string
+	City           string
+	Country        string
+	PostalCode     string
+	PlaidCategory1 string
+	PlaidCategory2 string
+	PlaidCategory3 string
 }
 
 type TransactionRecord struct {
@@ -31,13 +34,28 @@ type TransactionRecord struct {
 	Typecast bool
 }
 
-func Sync(transactions []plaid.Transaction) error {
-	client := airtable.Client{
-		APIKey: os.Getenv("AIRTABLE_KEY"),
-		BaseID: "appe5OMMgxrJhsr2U",
+type AccountBalanceFields struct {
+	AccountID           string
+	CurrentPlaidBalance float64
+	Date                string
+}
+type AccountBalanceRecord struct {
+	airtable.Record
+	Fields   AccountBalanceFields
+	Typecast bool
+}
+
+func SyncTransactions(transactions []plaid.Transaction) error {
+	if len(transactions) == 0 {
+		return nil
 	}
 
-	expenses := client.Table("Credit Card Expenses")
+	client := airtable.Client{
+		APIKey: os.Getenv("AIRTABLE_API_KEY"),
+		BaseID: os.Getenv("AIRTABLE_APP_ID"),
+	}
+
+	expenses := client.Table("Transactions")
 
 	plaidTransactions := make([]TransactionRecord, len(transactions))
 	for i, t := range transactions {
@@ -48,22 +66,23 @@ func Sync(transactions []plaid.Transaction) error {
 			return tags[n]
 		}
 		plaidTransactions[i] = TransactionRecord{Fields: TransactionFields{
-			PlaidID:      t.ID,
-			AccountID:    t.AccountID,
-			Amount:       t.Amount,
-			Name:         t.Name,
-			MerchantName: t.MerchantName,
-			Pending:      t.Pending,
-			DateTime:     t.Date,
-			Category1:    s(t.Category, 0),
-			Category2:    s(t.Category, 1),
-			Category3:    s(t.Category, 2),
-			Category12:   t.Category[:2],
-			Category123:  t.Category,
+			PlaidID:        t.ID,
+			AccountID:      t.AccountID,
+			Amount:         t.Amount,
+			Name:           t.Name,
+			MerchantName:   t.MerchantName,
+			Pending:        t.Pending,
+			DateTime:       t.Date,
+			Address:        t.Location.Address,
+			City:           t.Location.City,
+			Country:        t.Location.Country,
+			PostalCode:     t.Location.PostalCode,
+			PlaidCategory1: s(t.Category, 0),
+			PlaidCategory2: s(t.Category, 1),
+			PlaidCategory3: s(t.Category, 2),
 		}, Typecast: true}
 	}
 	plaidArranged := byAccountIDbyTransactionID(plaidTransactions)
-	fmt.Println(plaidArranged)
 
 	var airtableTransactions []TransactionRecord
 	err := expenses.List(&airtableTransactions, &airtable.Options{})
@@ -72,7 +91,6 @@ func Sync(transactions []plaid.Transaction) error {
 	}
 
 	airtableArranged := byAccountIDbyTransactionID(airtableTransactions)
-	fmt.Println(airtableArranged)
 
 	for accountID, transactions := range plaidArranged {
 		updates := updateAccount(transactions, airtableArranged[accountID])
@@ -82,22 +100,7 @@ func Sync(transactions []plaid.Transaction) error {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Created %d/%d transactions\n", i, len(updates.ToCreate))
-		}
-
-		for _, t := range updates.ToUpdate {
-			fmt.Println(t)
-			err := expenses.Update(&t)
-			if err != nil {
-				return err
-			}
-		}
-
-		for _, t := range updates.ToDelete {
-			err := expenses.Delete(&t)
-			if err != nil {
-				return err
-			}
+			fmt.Printf("Created %d/%d transactions\n", i+1, len(updates.ToCreate))
 		}
 	}
 
@@ -119,8 +122,6 @@ func byAccountIDbyTransactionID(ts []TransactionRecord) map[string]map[string]Tr
 
 type AccountUpdate struct {
 	ToCreate []TransactionRecord
-	ToUpdate []TransactionRecord
-	ToDelete []TransactionRecord
 }
 
 func updateAccount(plaidTs, airtableTs map[string]TransactionRecord) AccountUpdate {
@@ -128,20 +129,49 @@ func updateAccount(plaidTs, airtableTs map[string]TransactionRecord) AccountUpda
 	ids := make(map[string]struct{})
 	for id, t := range plaidTs {
 		ids[id] = struct{}{}
-		existing, ok := airtableTs[id]
-		if !ok {
+		_, ok := airtableTs[id]
+		if !ok && !t.Fields.Pending {
 			u.ToCreate = append(u.ToCreate, t)
-		} else if false { //existing.Fields != t.Fields {
-			_ = existing
-			// TODO: make update work
-			u.ToUpdate = append(u.ToUpdate, t)
 		}
 	}
 
-	for id, t := range airtableTs {
-		if _, ok := ids[id]; !ok {
-			u.ToDelete = append(u.ToDelete, t)
+	return u
+}
+
+func SyncAccountBalances(accountBalances []plaid.Account) error {
+	client := airtable.Client{
+		APIKey: os.Getenv("AIRTABLE_API_KEY"),
+		BaseID: os.Getenv("AIRTABLE_APP_ID"),
+	}
+
+	airtableBalancesTable := client.Table("Account Balances")
+	currentDate := time.Now().Format("2006-01-02")
+
+	for _, t := range accountBalances {
+		var existingBalanceRecords []AccountBalanceRecord
+		filterString := fmt.Sprintf("AND({AccountId} = \"%s\", DATETIME_FORMAT({Date}, \"YYYY-MM-DD\") = \"%s\")", t.AccountID, currentDate)
+		err := airtableBalancesTable.List(&existingBalanceRecords, &airtable.Options{
+			Filter: filterString,
+		})
+		if err != nil {
+			return err
+		}
+
+		if len(existingBalanceRecords) == 0 {
+			accountBalanceRecordToAdd := AccountBalanceRecord{Fields: AccountBalanceFields{
+				AccountID:           t.AccountID,
+				CurrentPlaidBalance: t.Balances.Current,
+				Date:                currentDate,
+			}, Typecast: true}
+
+			err := airtableBalancesTable.Create(&accountBalanceRecordToAdd)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Created balance record for accountID %s\n", t.AccountID)
+		} else {
+			fmt.Printf("Found pre-existing balance record for accountID %s\n", t.AccountID)
 		}
 	}
-	return u
+	return nil
 }

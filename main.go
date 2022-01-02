@@ -379,7 +379,7 @@ func main() {
 	transactionsCommand.Flags().StringVarP(&outputFormat, "output-format", "o", "json", "Output format")
 	transactionsCommand.Flags().StringVarP(&accountID, "account-id", "a", "", "Fetch transactions for this account ID only.")
 
-	airtableSyncCommand := &cobra.Command{
+	airtableSyncTransactionsCommand := &cobra.Command{
 		Use:   "sync-transactions [ITEM-ID-OR-ALIAS]",
 		Short: "Sync transactions for a given institution",
 		Args:  cobra.ExactArgs(1),
@@ -400,7 +400,7 @@ func main() {
 
 				layout := "2006-01-02"
 				now := time.Now()
-				start := now.AddDate(-2, 0, 0)
+				start := now.AddDate(-3, 0, 0)
 				options := plaid.GetTransactionsOptions{
 					StartDate:  start.Format(layout),
 					EndDate:    now.Format(layout),
@@ -410,12 +410,39 @@ func main() {
 				}
 
 				transactions, err := AllTransactions(options, client, token)
-				fmt.Println(transactions)
 				if err != nil {
 					return err
 				}
 
-				return Sync(transactions)
+				return SyncTransactions(transactions)
+			})
+
+			if err != nil {
+				log.Fatalln(err)
+			}
+		},
+	}
+
+	airtableSyncBalancesCommand := &cobra.Command{
+		Use:   "sync-account-balances [ITEM-ID-OR-ALIAS]",
+		Short: "Sync account balances for a given institution",
+		Long:  "Sync account balances for a given institution to Airtable base.",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			itemOrAlias := args[0]
+			itemID, ok := data.Aliases[itemOrAlias]
+			if ok {
+				itemOrAlias = itemID
+			}
+
+			err := WithRelinkOnAuthError(itemOrAlias, data, linker, func() error {
+				token := data.Tokens[itemOrAlias]
+				accountBalancesResponse, err := client.GetAccounts(token)
+				if err != nil {
+					return err
+				}
+
+				return SyncAccountBalances(accountBalancesResponse.Accounts)
 			})
 
 			if err != nil {
@@ -426,7 +453,7 @@ func main() {
 
 	var withStatusFlag bool
 	var withOptionalMetadataFlag bool
-	insitutionCommand := &cobra.Command{
+	institutionCommand := &cobra.Command{
 		Use:   "institution [ITEM-ID-OR-ALIAS]",
 		Short: "Get information about an institution",
 		Long:  "Get information about an institution. Status can be reported using a flag.",
@@ -472,8 +499,8 @@ func main() {
 			}
 		},
 	}
-	insitutionCommand.Flags().BoolVarP(&withStatusFlag, "status", "s", false, "Fetch institution status")
-	insitutionCommand.Flags().BoolVarP(&withOptionalMetadataFlag, "optional-metadata", "m", false, "Fetch optional metadata like logo and URL")
+	institutionCommand.Flags().BoolVarP(&withStatusFlag, "status", "s", false, "Fetch institution status")
+	institutionCommand.Flags().BoolVarP(&withOptionalMetadataFlag, "optional-metadata", "m", false, "Fetch optional metadata like logo and URL")
 
 	rootCommand := &cobra.Command{
 		Use:   "plaid-cli",
@@ -496,6 +523,8 @@ Configuration:
     PLAID_ENVIRONMENT=development
     PLAID_LANGUAGE=en  # optional, detected using system's locale
     PLAID_COUNTRIES=US # optional, detected using system's locale
+    AIRTABLE_API_KEY=<airtable API key>  # needed for syncing data into Airtable base
+    AIRTABLE_APP_ID=<airtable base ID> # target base application to dump data into
   
   I recommend setting and exporting these on shell startup.
   
@@ -522,8 +551,9 @@ Configuration:
 	rootCommand.AddCommand(aliasesCommand)
 	rootCommand.AddCommand(accountsCommand)
 	rootCommand.AddCommand(transactionsCommand)
-	rootCommand.AddCommand(airtableSyncCommand)
-	rootCommand.AddCommand(insitutionCommand)
+	rootCommand.AddCommand(airtableSyncTransactionsCommand)
+	rootCommand.AddCommand(airtableSyncBalancesCommand)
+	rootCommand.AddCommand(institutionCommand)
 
 	if !viper.IsSet("plaid.client_id") {
 		log.Println("⚠️  PLAID_CLIENT_ID not set. Please see the configuration instructions below.")
